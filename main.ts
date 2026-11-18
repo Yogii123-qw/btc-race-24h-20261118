@@ -18,6 +18,10 @@
 //     25 bps above the slow average, so the bot never chases a stale trend;
 //   - exit on the cross back through the lower band, or on an 80 bp trailing
 //     fall from the highest close since entry, whichever comes first.
+//   - fallback: if no trade has filled by bar 1000, the same shape of signal
+//     at a weaker threshold (5 bp band, 90-bar freshness, 40 bp extension)
+//     may take one entry, so a window with no strong trend still meets the
+//     guardrail of at least one trade instead of sitting out entirely.
 // All comparisons are exact integer arithmetic on the bar closes, so two runs
 // on the same data answer byte for byte the same. No clock, no randomness,
 // no network, no environment reads: time is the bar time in each batch.
@@ -33,6 +37,10 @@ const FRESH_MAX_BARS = 60;
 const EXTENSION_MAX_BPS = 25;
 const TRAIL_BPS = 80;
 const COOLDOWN_BARS = 30;
+const FALLBACK_BAR = 1000;
+const FALLBACK_BAND_BPS = 5;
+const FALLBACK_FRESH_MAX_BARS = 90;
+const FALLBACK_EXTENSION_MAX_BPS = 40;
 const MAX_SLIPPAGE_BPS = 100;
 const BPS_DENOM = 10_000n;
 
@@ -42,10 +50,12 @@ const SYMBOL = 'CBBTC';
 const closes: bigint[] = [];
 let barIndex = 0;
 let aboveBandStreak = 0;
+let aboveFallbackStreak = 0;
 let barsAbove = 0;
 let lastExitBar = -1_000_000;
 let runHigh: bigint | null = null;
 let wasHolding = false;
+let everTraded = false;
 
 function sumLast(window: number): bigint {
   let total = 0n;
@@ -54,6 +64,9 @@ function sumLast(window: number): bigint {
 }
 
 function onBatch(state: BarsState, batch: Batch): OrderInput[] {
+  for (const fill of batch.fills) {
+    if (fill.status === 'filled') everTraded = true;
+  }
   const bar = batch.bars.find((b) => b.symbol === SYMBOL);
   if (bar === undefined) return [];
   const close = BigInt(bar.c);
@@ -82,19 +95,28 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
 
   const aboveBand = fastScaled * BPS_DENOM > slowScaled * (BPS_DENOM + BigInt(BAND_BPS));
   const belowBand = fastScaled * BPS_DENOM < slowScaled * (BPS_DENOM - BigInt(BAND_BPS));
+  const aboveFallbackBand = fastScaled * BPS_DENOM > slowScaled * (BPS_DENOM + BigInt(FALLBACK_BAND_BPS));
   aboveBandStreak = aboveBand ? aboveBandStreak + 1 : 0;
+  aboveFallbackStreak = aboveFallbackBand ? aboveFallbackStreak + 1 : 0;
   barsAbove = fastScaled > slowScaled ? barsAbove + 1 : 0;
 
   if (state.warmingUp) return [];
 
   if (!holding) {
     // Entry: fresh, confirmed, unextended slow uptrend, past the cooldown.
-    if (aboveBandStreak < CONFIRM_BARS) return [];
-    if (barsAbove > FRESH_MAX_BARS) return [];
-    // close <= slowAvg * (1 + 25 bps), in integers.
+    // The fallback tier only arms late in a window with no filled trade yet.
     const stretched = close * BigInt(SLOW_BARS) * BPS_DENOM > slowSum * (BPS_DENOM + BigInt(EXTENSION_MAX_BPS));
-    if (stretched) return [];
-    if (barIndex - lastExitBar < COOLDOWN_BARS) return [];
+    const stretchedFallback =
+      close * BigInt(SLOW_BARS) * BPS_DENOM > slowSum * (BPS_DENOM + BigInt(FALLBACK_EXTENSION_MAX_BPS));
+    const strictEntry =
+      aboveBandStreak >= CONFIRM_BARS && barsAbove <= FRESH_MAX_BARS && !stretched && barIndex - lastExitBar >= COOLDOWN_BARS;
+    const fallbackEntry =
+      barIndex >= FALLBACK_BAR &&
+      !everTraded &&
+      aboveFallbackStreak >= CONFIRM_BARS &&
+      barsAbove <= FALLBACK_FRESH_MAX_BARS &&
+      !stretchedFallback;
+    if (!strictEntry && !fallbackEntry) return [];
     const minNotional = BigInt(state.hello.fees.min_notional_quote_units);
     const room = state.weightRoom(SYMBOL);
     const spend = state.cash < room ? state.cash : room;
