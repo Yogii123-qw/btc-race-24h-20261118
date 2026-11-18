@@ -12,7 +12,7 @@
 // tiny (about 7 bps of noise) while a full-size round trip costs about 26 bps,
 // so the bot trades rarely and only rides a fresh slow uptrend:
 //   - a fast 60-bar average of closes above a slow 180-bar average by a 10 bp
-//     band, confirmed for 5 consecutive bars;
+//     band, confirmed for 3 consecutive bars;
 //   - the cross must be fresh (the fast average has been above the slow one
 //     for at most 60 bars) and the close must not be stretched more than
 //     25 bps above the slow average, so the bot never chases a stale trend;
@@ -28,7 +28,7 @@ import type { BarsState, Batch, OrderInput } from './vendor/makefun-bars.ts';
 const FAST_BARS = 60;
 const SLOW_BARS = 180;
 const BAND_BPS = 10;
-const CONFIRM_BARS = 5;
+const CONFIRM_BARS = 3;
 const FRESH_MAX_BARS = 60;
 const EXTENSION_MAX_BPS = 25;
 const TRAIL_BPS = 80;
